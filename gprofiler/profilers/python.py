@@ -61,7 +61,15 @@ from gprofiler.utils.collapsed_format import parse_one_collapsed_file
 if is_linux():
     from gprofiler.profilers.python_ebpf import PythonEbpfProfiler, PythonEbpfError
 
-from gprofiler.utils import pgrep_exe, pgrep_maps, random_prefix, removed_path, resource_path, run_process
+from gprofiler.utils import (
+    pgrep_exe,
+    pgrep_maps,
+    random_prefix,
+    removed_path,
+    resource_path,
+    run_process,
+    run_process_as_target,
+)
 from gprofiler.utils.process import process_comm, search_proc_maps
 
 logger = get_logger_adapter(__name__)
@@ -131,6 +139,12 @@ class PythonMetadata(ApplicationMetadata):
             return None
 
     def _get_sys_maxunicode(self, process: Process) -> Optional[str]:
+        """
+        Get sys.maxunicode from a Python 2 process.
+
+        Security: Executes with the target process's UID/GID to prevent
+        privilege escalation if the binary is attacker-controlled.
+        """
         try:
             if not is_process_basename_matching(process, application_identifiers._PYTHON_BIN_RE):
                 # see same raise above
@@ -138,12 +152,18 @@ class PythonMetadata(ApplicationMetadata):
 
             python_path = f"/proc/{get_process_nspid(process.pid)}/exe"
 
+            # Get credentials BEFORE entering namespace
+            # (psutil can't resolve host PIDs inside namespace)
+            target_uid = process.uids().real
+            target_gid = process.gids().real
+
             def _run_python_process_in_ns() -> "CompletedProcess[bytes]":
-                return run_process(
+                return run_process_as_target(
                     [python_path, "-S", "-c", "import sys; print(sys.maxunicode)"],
+                    target_uid=target_uid,
+                    target_gid=target_gid,
                     stop_event=self._stop_event,
                     timeout=self._PYTHON_TIMEOUT,
-                    pdeathsigger=False,
                 )
 
             result = cast(CompletedProcess, run_in_ns_wrapper(["pid", "mnt"], _run_python_process_in_ns, process.pid))

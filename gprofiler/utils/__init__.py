@@ -59,6 +59,7 @@ from gprofiler.exceptions import (
     StopEventSetException,
 )
 from gprofiler.log import get_logger_adapter
+from gprofiler.platform import is_linux as _is_linux_for_priv
 
 logger = get_logger_adapter(__name__)
 
@@ -523,6 +524,81 @@ def cleanup_process_reference(process: Popen) -> None:
         _processes.remove(process)
     except ValueError:
         pass  # Already removed
+
+
+def run_process_as_target(
+    cmd: List[str],
+    target_uid: int,
+    target_gid: int,
+    stop_event: Optional[Event] = None,
+    timeout: int = 5,
+    **kwargs: Any,
+) -> "CompletedProcess[bytes]":
+    """
+    Execute a command with the specified UID/GID (dropping privileges if root).
+
+    Security: This function drops privileges before executing the command,
+    preventing privilege escalation if the binary is attacker-controlled.
+
+    Note: Callers must resolve target_uid/target_gid BEFORE entering any
+    PID/mount namespaces, since these lookups may fail inside a different namespace.
+
+    Uses subprocess user/group parameters which handle privilege dropping in
+    the child process after fork (implemented in C, no preexec_fn deadlock risk).
+
+    Args:
+        cmd: Command and arguments to execute
+        target_uid: The UID to run the command as
+        target_gid: The GID to run the command as
+        stop_event: Optional event to signal stop (created internally if None)
+        timeout: Command timeout in seconds (default: 5)
+        **kwargs: Additional arguments passed to run_process()
+
+    Returns:
+        CompletedProcess with stdout/stderr
+    """
+    # Create a dummy Event if none provided, so timeouts work
+    # (run_process asserts timeout must be None when stop_event is None)
+    if stop_event is None:
+        stop_event = Event()
+
+    # Always disable pdeathsigger wrapper when running as target
+    # This function is called inside target namespaces where pdeathsigger may not exist
+    kwargs["pdeathsigger"] = False
+
+    # Only drop privileges on Linux when running as root and target is non-root
+    # Use is_root() which handles user-namespace/container scenarios properly
+    should_drop = _is_linux_for_priv() and is_root() and target_uid != 0
+    logger.debug(
+        "run_process_as_target called",
+        cmd=cmd,
+        target_uid=target_uid,
+        target_gid=target_gid,
+        is_linux=_is_linux_for_priv(),
+        is_root=is_root(),
+        should_drop_privileges=should_drop,
+    )
+
+    if should_drop:
+        # Use subprocess user/group params for privilege dropping
+        # This is handled in C code after fork(), before exec() - no deadlock risk
+        # and works inside any namespace (no external binary needed)
+        kwargs["user"] = target_uid
+        kwargs["group"] = target_gid
+        kwargs["extra_groups"] = []
+        logger.debug(
+            "Privilege dropping enabled",
+            user=kwargs["user"],
+            group=kwargs["group"],
+        )
+
+    logger.debug("Calling run_process", cmd=cmd, timeout=timeout)
+    return run_process(
+        cmd,
+        stop_event=stop_event,
+        timeout=timeout,
+        **kwargs,
+    )
 
 
 def _exit_handler() -> None:
