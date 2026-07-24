@@ -1,3 +1,4 @@
 [submodule "granulate-utils"]
 	path = granulate-utils
-	url = https://github.com/intel/granulate-utils.git
+	url = https://github.com/mlim19/granulate-utils.git
+	branch = fix_ns_timeout
